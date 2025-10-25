@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>TP Virtuel — Cellule Photovoltaïque</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+body { font-family: system-ui, sans-serif; background: #f5f7fa; color: #111; margin:20px; }
+h1 { text-align:center; color: #0b76ef; }
+.layout { display:flex; flex-wrap:wrap; gap:20px; }
+.controls { background:#fff; border-radius:12px; padding:16px; width:420px; border:1px solid #ccc; box-shadow:0 3px 6px rgba(0,0,0,0.1); }
+label { display:block; margin-top:10px; font-size:14px; }
+.meters { display:flex; gap:12px; margin-top:12px; }
+.meter { flex:1; padding:8px; text-align:center; border-radius:8px; background:#fafafa; border:1px solid #ddd; font-weight:600; }
+.meter .big { font-size:20px; font-weight:700; }
+input[type=range] { width:100%; accent-color:#0b76ef; }
+button { margin-top:8px; padding:8px 12px; border-radius:6px; border:none; background:#0b76ef; color:#fff; cursor:pointer; }
+button.secondary { background:#666; margin-left:8px; }
+button.active { background:#e91e63 !important; }
+.table-wrap { margin-top:12px; max-height:220px; overflow:auto; border:1px solid #eee; border-radius:6px; background:#fff;}
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { padding:8px; border-bottom:1px solid #f0f0f0; text-align:center; }
+canvas { width:100%; height:320px; display:block; background: #fff; border-radius: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+.charts-container { display:flex; gap:20px; flex:1; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<h1>TP Virtuel — Cellule Photovoltaïque
+<span style="display:block; font-size:15px; font-weight:normal;">
+    (Developed by Prof. AL KWATLI) 
+  </span>
+  <span style="display:block; font-size:15px; font-weight:normal;">
+    E-mail: dr.alkwatli@gmail.com
+  </span>
+
+</h1>
+
+<div class="layout">
+  <div class="controls">
+    <label>Éclairement (%) : <span id="Gval">100</span>
+      <input id="G" type="range" min="10" max="100" step="10" value="100">
+    </label>
+    <label>Résistance R (Ω) : <span id="Rval">50</span>
+      <input id="R" type="range" min="1" max="200" step="1" value="50">
+    </label>
+
+    <div class="meters">
+      <div class="meter"><div>U (V)</div><div id="Udisplay" class="big">0.00</div></div>
+      <div class="meter"><div>I (A)</div><div id="Idisplay" class="big">0.000</div></div>
+      <div class="meter"><div>P (W)</div><div id="Pdisplay" class="big">0.000</div></div>
+    </div>
+
+    <div style="margin-top:12px;">
+      <button id="record">Enregistrer mesure</button>
+      <button id="autosweep" class="secondary">Balayage auto</button>
+      <button id="export" class="secondary">Exporter CSV</button>
+      <button id="clear" class="secondary">Effacer</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>R (Ω)</th><th>U (V)</th><th>I (A)</th><th>P (W)</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="charts-container">
+    <canvas id="ivChart"></canvas>
+    <canvas id="puChart"></canvas>
+  </div>
+</div>
+
+<script>
+const Voc_ref = 1.0, Isc_ref = 0.2;
+const Rinput = document.getElementById("R"), Ginput = document.getElementById("G");
+const Rval = document.getElementById("Rval"), Gval = document.getElementById("Gval");
+const Udisplay = document.getElementById("Udisplay"), Idisplay = document.getElementById("Idisplay"), Pdisplay = document.getElementById("Pdisplay");
+const recordBtn = document.getElementById("record"), exportBtn = document.getElementById("export"), clearBtn = document.getElementById("clear"), autosweepBtn = document.getElementById("autosweep");
+const logBody = document.getElementById("log");
+
+let logIndex = 0;
+let pointsIV = [], pointsPU = [];
+let sweepHandle = null;
+
+// PV current function
+function pvI(U,G) { return Math.max(0, Isc_ref*G*(1 - Math.exp(5*(U/Voc_ref - 1)))); }
+
+// Find operating point
+function findOp(R,G) {
+  const steps = 200;
+  let Uvals=[], Ivals=[];
+  for(let i=0;i<=steps;i++){
+    let U = Voc_ref*i/steps;
+    let I = pvI(U,G);
+    Uvals.push(U); Ivals.push(I);
+  }
+  for(let i=1;i<=steps;i++){
+    let load_prev = Uvals[i-1]/R, load = Uvals[i]/R;
+    if(Ivals[i] <= load){
+      let t=(Ivals[i-1]-load_prev)/((Ivals[i-1]-load_prev)-(Ivals[i]-load));
+      let Uop = Uvals[i-1] + t*(Uvals[i]-Uvals[i-1]);
+      let Iop = pvI(Uop,G);
+      return {Uop,Iop};
+    }
+  }
+  return {Uop: Uvals[Uvals.length-1], Iop: Ivals[Ivals.length-1]};
+}
+
+// Setup charts
+const ivChart = new Chart(document.getElementById("ivChart"), {
+  type: 'scatter',
+  data: {
+    datasets: [
+      {label:'I–V',data:[],borderColor:'red',backgroundColor:'rgba(255,0,0,0.3)',showLine:true,tension:0.25},
+      {label:'Point',data:[],type:'scatter',pointRadius:6,pointBackgroundColor:'black'}
+    ]
+  },
+  options: {
+    animation: false,
+    plugins: { legend:{display:false}, title:{display:true,text:'Caractéristique I–V', font:{size:16}} },
+    scales: {
+      x:{title:{display:true,text:'Tension U (V)',font:{size:14}},grid:{color:'rgba(0,0,0,0.1)'}, min:0, max:1.2},
+      y:{title:{display:true,text:'Courant I (A)',font:{size:14}},grid:{color:'rgba(0,0,0,0.1)'}, beginAtZero:true}
+    }
+  }
+});
+
+const puChart = new Chart(document.getElementById("puChart"), {
+  type: 'scatter',
+  data: {
+    datasets: [
+      {label:'P–U',data:[],borderColor:'green',backgroundColor:'rgba(0,128,0,0.3)',showLine:true,tension:0.25},
+      {label:'Point',data:[],type:'scatter',pointRadius:6,pointBackgroundColor:'black'}
+    ]
+  },
+  options: {
+    animation: false,
+    plugins: { legend:{display:false}, title:{display:true,text:'Puissance–Tension (P–U)', font:{size:16}} },
+    scales: {
+      x:{title:{display:true,text:'Tension U (V)',font:{size:14}},grid:{color:'rgba(0,0,0,0.1)'}, min:0, max:1.2},
+      y:{title:{display:true,text:'Puissance P (W)',font:{size:14}},grid:{color:'rgba(0,0,0,0.1)'}, beginAtZero:true}
+    }
+  }
+});
+
+// Refresh meters and point
+function refresh(){
+  let R=+Rinput.value, G=+Ginput.value/100;
+  Rval.textContent = R; Gval.textContent = Math.round(G*100);
+  let {Uop,Iop} = findOp(R,G);
+  let P = Uop*Iop;
+  Udisplay.textContent = Uop.toFixed(3); Idisplay.textContent = Iop.toFixed(3); Pdisplay.textContent = P.toFixed(3);
+  ivChart.data.datasets[1].data=[{x:Uop,y:Iop}];
+  puChart.data.datasets[1].data=[{x:Uop,y:P}];
+  ivChart.update('none'); puChart.update('none');
+  return {Uop,Iop,P};
+}
+
+// Record measurement
+function recordMeasurement(){
+  let {Uop,Iop,P} = refresh();
+  pointsIV.push({x:Uop,y:Iop}); pointsPU.push({x:Uop,y:P});
+  ivChart.data.datasets[0].data = pointsIV; puChart.data.datasets[0].data = pointsPU;
+  ivChart.update(); puChart.update();
+  logIndex++;
+  let tr=document.createElement('tr');
+  tr.innerHTML=`<td>${logIndex}</td><td>${Rinput.value}</td><td>${Uop.toFixed(3)}</td><td>${Iop.toFixed(3)}</td><td>${P.toFixed(3)}</td>`;
+  logBody.appendChild(tr);
+}
+
+// Clear everything
+function clearAll(){pointsIV=[]; pointsPU=[]; ivChart.data.datasets[0].data=[]; puChart.data.datasets[0].data=[]; ivChart.update(); puChart.update(); logBody.innerHTML=''; logIndex=0;}
+
+// Export CSV
+function exportCSV(){
+  let rows=[['#','R (Ω)','U (V)','I (A)','P (W)']];
+  logBody.querySelectorAll('tr').forEach(tr=>{rows.push(Array.from(tr.children).map(td=>td.textContent))});
+  const csv = rows.map(r=>r.join(',')).join('\n');
+  const blob = new Blob([csv],{type:'text/csv'}); const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download='mesures_pv.csv'; a.click(); URL.revokeObjectURL(url);
+}
+
+// Animated auto sweep
+function autoSweep() {
+  if (sweepHandle) {
+    clearInterval(sweepHandle);
+    sweepHandle = null;
+    autosweepBtn.textContent = 'Balayage auto';
+    autosweepBtn.classList.remove('active');
+    return;
+  }
+
+  clearAll();
+  autosweepBtn.textContent = '⏸ Arrêter balayage';
+  autosweepBtn.classList.add('active');
+
+  let Rcurrent = +Rinput.min;
+  const Rmax = +Rinput.max;
+  const G = +Ginput.value / 100;
+
+  sweepHandle = setInterval(() => {
+    Rinput.value = Rcurrent;
+    Rval.textContent = Rcurrent;
+
+    const { Uop, Iop, P } = refresh();
+
+    pointsIV.push({ x: Uop, y: Iop });
+    pointsPU.push({ x: Uop, y: P });
+
+    ivChart.data.datasets[0].data = pointsIV;
+    puChart.data.datasets[0].data = pointsPU;
+    ivChart.data.datasets[1].data = [{ x: Uop, y: Iop }];
+    puChart.data.datasets[1].data = [{ x: Uop, y: P }];
+
+    ivChart.update('none');
+    puChart.update('none');
+
+    logIndex++;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${logIndex}</td><td>${Rcurrent}</td><td>${Uop.toFixed(3)}</td><td>${Iop.toFixed(3)}</td><td>${P.toFixed(3)}</td>`;
+    logBody.appendChild(tr);
+    logBody.scrollTop = logBody.scrollHeight;
+
+    if (Rcurrent >= Rmax) {
+      clearInterval(sweepHandle);
+      sweepHandle = null;
+      autosweepBtn.textContent = 'Balayage auto';
+      autosweepBtn.classList.remove('active');
+    } else { Rcurrent += 5; }
+  }, 150);
+}
+
+// Event listeners
+Rinput.addEventListener('input',refresh);
+Ginput.addEventListener('input',refresh);
+recordBtn.addEventListener('click',recordMeasurement);
+clearBtn.addEventListener('click',clearAll);
+exportBtn.addEventListener('click',exportCSV);
+autosweepBtn.addEventListener('click',autoSweep);
+
+// Initial draw
+refresh();
+</script>
+</body>
+</html>
